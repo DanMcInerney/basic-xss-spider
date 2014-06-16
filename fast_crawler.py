@@ -12,6 +12,8 @@ import gevent.queue
 import urllib
 import time
 import requests
+import mechanize
+import cookielib
 import gevent
 #from BeautifulSoup import UnicodeDammit
 import lxml.html
@@ -21,6 +23,9 @@ from random import randrange
 from urlparse import urlparse
 import socket
 socket.setdefaulttimeout(30)
+
+from xss_tester import XSS_tester
+
 
 
 def parse_args():
@@ -51,11 +56,29 @@ class Spider:
 
         self.allLinks = set()
         self.filtered = 0
+        #self.br = self.browser()
+        self.hit = []
 
         self.base_url = args.url
         self.seed_url = requests.get(self.base_url, headers = {"User-Agent":self.get_user_agent()}, timeout=30).url
         self.allLinks.add(self.seed_url)
-        self.netQ.put(self.seed_url)
+        self.netQ.put((self.seed_url, None))
+
+    def browser(self):
+        br = mechanize.Browser()
+
+        cj = cookielib.LWPCookieJar()
+        br.set_cookiejar(cj)
+
+        br.set_handle_equiv(True)
+        br.set_handle_gzip(True)
+        br.set_handle_redirect(True)
+        br.set_handle_referer(True)
+        br.set_handle_robots(False)
+
+# Follows refresh 0 but not hangs on refresh > 0
+        br.set_handle_refresh(mechanize._http.HTTPRefreshProcessor(), max_time=1)
+        return br
 
     def start(self):
         self.scheduler_glet = gevent.spawn(self.scheduler)
@@ -69,7 +92,7 @@ class Spider:
                 # Spawn network conns for each unprocessed link
                 if not self.netQ.empty():
                     for x in xrange(0, min(self.netQ.qsize(), self.netPool.free_count())):
-                        self.netPool.spawn(self.netWorker)
+                        self.netPool.spawn(self.netWorker, None) # set payload to None since we're just checking links
                 # Spawn worker to process html
                 if not self.processingQ.empty():# and not self.processingPool.full():# and self.processingPool.free_count() != self.processingPool.size:
                     for x in xrange(0, min(self.processingQ.qsize(), self.processingPool.free_count())):
@@ -78,31 +101,42 @@ class Spider:
                 # If no more links in netQ, wait for processing to finish, check if there's any more links to process and if not, exit
                 #if self.netQ.empty(): #and self.processingPool.free_count() == self.processingPool.size: ####### FIX, queue might commonly be emtpy, try checking pool counts instead
                 if self.netPool.free_count() == self.netPool.size and self.processingPool.free_count() == self.processingPool.size:
+                    print ''
+                    for h in self.hit:
+                        print h
                     sys.exit('All links: %d, Filtered: %d, percent filtered: %f, Runtime: %f' % (len(self.allLinks), self.filtered, float(self.filtered)/float(len(self.allLinks)), time.time() - start_time))
 
                 gevent.sleep(0)
 
         except KeyboardInterrupt:
+            print ''
+            for h in self.hit:
+                print h
             sys.exit('All links: %d, Filtered: %d, percent filtered: %f, Runtime: %s' % (len(self.allLinks), self.filtered, float(self.filtered)/float(len(self.allLinks)), time.time() - start_time))
 
-    def netWorker(self):
+    def netWorker(self, payload):
         ''' Fetchs the response to each link found '''
         # How to avoid opening links which just all redirect to the same page? append all found links
         # to a list maybe rather than just the post-redirected URL
+        url, payload = self.netQ.get()
         try:
-            url = self.netQ.get()
             resp = requests.get(url, headers = {'User-Agent':self.get_user_agent()}, timeout=30)
         except Exception as e:
             self.logger.error('Error opening %s: %s' % (url, str(e)))
             #print '[!] Error: %s\n          ' % url, e
             return
 
-        orig_url = url
-        self.processingQ.put((resp, orig_url))
+        #orig_url = url
+
+        # Either add the resp to the queue, or test it for XSS
+        if payload:
+            self.processingQ.put((resp, payload))
+        else:
+            self.processingQ.put((resp, None))
 
     def processingWorker(self):
         ''' Parse the HTML and convert the links to usable URLs '''
-        resp, orig_url = self.processingQ.get()
+        resp, payload = self.processingQ.get()
 
         if '/' == resp.url[:-1]:
             url = resp.url[:-1] # this gets the url in case of redirect and strips the last '/'
@@ -114,45 +148,70 @@ class Spider:
         # If seed url, save the root domain to confirm further links are hosted on the same domain
         if url == self.seed_url:
             self.root_domain = self.url_processor(url)[2]
-        hostname, protocol, root_domain = self.url_processor(url)
+        hostname, protocol, path, root_domain = self.url_processor(url)
 
         html = resp.content
-        raw_links = self.get_raw_links(html, url)
-        if raw_links == None:
-            self.logger.debug('No raw links found; ending processing: %s' % url)
-            return
 
-        # Only add links that are within scope
-        if self.root_domain in hostname:
-            parent_hostname = protocol+hostname
+        if payload:
+            self.xssVerifier(url, html, payload)
+        else:
+            # Get links
+            raw_links = self.get_raw_links(html, url)
+            if raw_links == None:
+                self.logger.debug('No raw links found; ending processing: %s' % url)
+                return
+
+            # Only add links that are within scope
+            if self.root_domain in hostname:
+                parent_hostname = protocol+hostname
+            else:
+                return
+
+            link_exts = ['.ogg', '.flv', '.swf', '.mp3', '.jpg', '.jpeg', '.gif', '.css', '.ico', '.rss' '.tiff', '.png', '.pdf']
+            for link in raw_links:
+                link = self.filter_links(link, link_exts, parent_hostname)
+                if link:
+                    linkSet = set()
+                    linkSet.add(link)
+                    if not linkSet.issubset(self.allLinks):
+                        self.allLinks.add(link)
+                        self.netQ.put((link, None))
+                        print 'Link found:', link
+                        self.checkForURLparams(link)
+
+    def checkForURLparams(self, link):
+        if '=' in link: # Check if there are URL parameters
+            moddedParams = XSS_tester().main(link)
+            hostname, protocol, root_domain, path = self.url_processor(link)
+            for payload in moddedParams:
+                for params in moddedParams[payload]:
+                    joinedParams = urllib.urlencode(params, doseq=1) # doseq maps the params back together
+                    newLink = urllib.unquote(protocol+hostname+path+'?'+joinedParams)
+                    print 'XSS test:', newLink
+                    self.netQ.put((newLink, payload))
+            print ''
+####################################################
+#WORK HERE above and below. do I need a new queue for the XSS testing network connections? Then just have netWorker specify which queue to pick from
+####################################################
+    def xssVerifier(self, url, html, payload):
+        if '%22' in payload or '%u0022' in payload.lower(): # encoded
+            match = '">svg/onload=prompt(98)>'
+        else:
+            match = payload
+
+        if match in html:
+            print '************FOUND**************** '+url
+            self.hit.append(url)
+            return True
         else:
             return
-
-        link_exts = ['.ogg', '.flv', '.swf', '.mp3', '.jpg', '.jpeg', '.gif', '.css', '.ico', '.rss' '.tiff', '.png', '.pdf']
-        for link in raw_links:
-            link = self.filter_links(link, link_exts, parent_hostname)
-
-            if link:
-                linkSet = set()
-                linkSet.add(link)
-                if not linkSet.issubset(self.allLinks):
-                    self.allLinks.add(link)
-                    self.netQ.put(link)
-                    print 'Link found:', link
-
-            # Only interested in testing post-redirect urls as with 'link' var
-            # so we only add 'link' var to unprocessedLinks
-            # We add the original URL to allLinks so that we don't check it again
-            #orig_urlSet = set()
-            #orig_urlSet.add(orig_url)
-            #if not orig_urlSet.issubset(self.allLinks):
-            #    self.allLinks.add(orig_url)
-
 
     def url_processor(self, url):
         ''' Get the url domain, protocol, and hostname using urlparse '''
         try:
             parsed_url = urlparse(url)
+            # Get the path
+            path = parsed_url.path
             # Get the protocol
             protocol = parsed_url.scheme+'://'
             # Get the hostname (includes subdomains)
@@ -163,7 +222,7 @@ class Spider:
             print '[-] Could not parse url:', url
             return
 
-        return (hostname, protocol, root_domain)
+        return (hostname, protocol, root_domain, path)
 
     def get_raw_links(self, html, url):
         ''' Finds all links on the page lxml is faster than BeautifulSoup '''
