@@ -6,6 +6,7 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 
+import re
 import logging
 import gevent.pool
 import gevent.queue
@@ -41,8 +42,9 @@ class Spider:
     def __init__(self, args):
 
         # Set up the logging
-        #logging.basicConfig(level=logging.DEBUG)
-        logging.basicConfig(level=logging.ERROR)
+        self.logfile = open('vulnerable_URLs.txt', 'a')
+        logging.basicConfig(level=logging.DEBUG)
+        #logging.basicConfig(level=logging.ERROR)
         #logging.basicConfig(level=None)
         self.logger = logging.getLogger(__name__)
         self.handler = logging.FileHandler('crawler.log', 'a')
@@ -50,17 +52,19 @@ class Spider:
         self.logger.addHandler(self.handler)
 
         self.netQ = gevent.queue.Queue()
-        self.netPool = gevent.pool.Pool(1000)
+        self.netPool = gevent.pool.Pool(20)
         self.processingQ = gevent.queue.Queue()
-        self.processingPool = gevent.pool.Pool(50)
+        self.processingPool = gevent.pool.Pool(10)
 
         self.allLinks = set()
         self.filtered = 0
         #self.br = self.browser()
         self.hit = []
+        self.XSS = XSS_tester()
+        self.pload = list(self.XSS.payloadTest)
 
         self.base_url = args.url
-        self.seed_url = requests.get(self.base_url, headers = {"User-Agent":self.get_user_agent()}, timeout=30).url
+        self.seed_url = requests.get(self.base_url, headers = {"User-Agent":self.get_user_agent()}, timeout=30, verify=False).url
         self.allLinks.add(self.seed_url)
         self.netQ.put((self.seed_url, None))
 
@@ -148,63 +152,102 @@ class Spider:
         # If seed url, save the root domain to confirm further links are hosted on the same domain
         if url == self.seed_url:
             self.root_domain = self.url_processor(url)[2]
-        hostname, protocol, path, root_domain = self.url_processor(url)
 
         html = resp.content
 
         if payload:
-            self.xssVerifier(url, html, payload)
+            self.xssChecker(url, html, payload)
         else:
             # Get links
-            raw_links = self.get_raw_links(html, url)
-            if raw_links == None:
-                self.logger.debug('No raw links found; ending processing: %s' % url)
-                return
+            self.getLinks(html, url)
 
-            # Only add links that are within scope
-            if self.root_domain in hostname:
-                parent_hostname = protocol+hostname
-            else:
-                return
+    def getLinks(self, html, url):
+        hostname, protocol, path, root_domain = self.url_processor(url)
+        raw_links = self.get_raw_links(html, url)
+        if raw_links == None:
+            self.logger.debug('No raw links found; ending processing: %s' % url)
+            return
 
-            link_exts = ['.ogg', '.flv', '.swf', '.mp3', '.jpg', '.jpeg', '.gif', '.css', '.ico', '.rss' '.tiff', '.png', '.pdf']
-            for link in raw_links:
-                link = self.filter_links(link, link_exts, parent_hostname)
-                if link:
-                    linkSet = set()
-                    linkSet.add(link)
-                    if not linkSet.issubset(self.allLinks):
-                        self.allLinks.add(link)
-                        self.netQ.put((link, None))
-                        print 'Link found:', link
-                        self.checkForURLparams(link)
+        # Only add links that are within scope
+        if self.root_domain in hostname:
+            parent_hostname = protocol+hostname
+        else:
+            return
+
+        # Make sure to check the seed URL for XSS vectors
+        if url == self.seed_url:
+            self.checkForURLparams(url)
+
+        link_exts = ['.ogg', '.flv', '.swf', '.mp3', '.jpg', '.jpeg', '.gif', '.css', '.ico', '.rss' '.tiff', '.png', '.pdf']
+        for link in raw_links:
+            link = self.filter_links(link, link_exts, parent_hostname)
+            if link:
+                linkSet = set()
+                linkSet.add(link)
+                if not linkSet.issubset(self.allLinks):
+                    self.allLinks.add(link)
+                    self.netQ.put((link, None))
+                    print 'Link found:', link ####################3
+                    # Add the XSS payloaded links to the queue if it has variables in it
+                    self.checkForURLparams(link)
 
     def checkForURLparams(self, link):
+        ''' Add links with variables in them to the queue again but with XSS testing payloads '''
         if '=' in link: # Check if there are URL parameters
-            moddedParams = XSS_tester().main(link)
+            moddedParams = self.XSS.main(link)
             hostname, protocol, root_domain, path = self.url_processor(link)
             for payload in moddedParams:
                 for params in moddedParams[payload]:
                     joinedParams = urllib.urlencode(params, doseq=1) # doseq maps the params back together
                     newLink = urllib.unquote(protocol+hostname+path+'?'+joinedParams)
-                    print 'XSS test:', newLink
+                    #print newLink
                     self.netQ.put((newLink, payload))
-            print ''
-####################################################
-#WORK HERE above and below. do I need a new queue for the XSS testing network connections? Then just have netWorker specify which queue to pick from
-####################################################
-    def xssVerifier(self, url, html, payload):
-        if '%22' in payload or '%u0022' in payload.lower(): # encoded
-            match = '">svg/onload=prompt(98)>'
-        else:
-            match = payload
+            #print ''
 
-        if match in html:
-            print '************FOUND**************** '+url
+    def xssChecker(self, url, html, payload):
+        delim = self.XSS.xssDelim
+        test = self.XSS.payloadTest
+        testList = list(self.XSS.payloadTest)
+        foundChars = []
+        allFoundChars = []
+        allBetweenDelims = '%s(.*?)%s' % (delim, delim)
+        #allBetweenDelims = '%s(.{0,10})(%s)?' % (delim, delim) #This works too in case the second delim is missing, just add m=m[0]
+
+        # Check if the test string is in the html, if so then it's very vulnerable
+        # Some way to not run through html twice if nothing is found here?
+        if test in html:
+            print '100% vulnerable:', url
             self.hit.append(url)
-            return True
-        else:
+            self.logfile.write(url+'\n')
             return
+
+        # Check which characters show up unescaped
+        matches = re.findall(allBetweenDelims, html)
+        if len(matches) > 0:
+            for m in matches:
+                # Check for the special chars
+                for c in testList:
+                    if c in m:
+                        foundChars.append(c)
+                #print 'Found chars:', foundChars, url
+                allFoundChars.append(foundChars)
+                foundChars = []
+            #print allFoundChars, url
+            for chars in allFoundChars:
+                if testList == chars:
+                    print '100% vulnerable:', url
+                    self.hit.append(url)
+                    self.logfile.write(url+'\n')
+                    return
+                elif set(['"', '<', '>', '=', ')', '(']).issubset(set(chars)):
+                    print 'Vulnerable! Try: "><svg onload=prompt(1) as the payload', url
+                    self.hit.append(url)
+                    self.logfile.write(url)
+                #elif set([';', '(', ')']).issubset(set(chars)):
+                #    print 'If this parameter is reflected in javascript, try payload: javascript:alert(1)', url
+                #    self.hit.append(url)
+
+            allFoundChars = []
 
     def url_processor(self, url):
         ''' Get the url domain, protocol, and hostname using urlparse '''

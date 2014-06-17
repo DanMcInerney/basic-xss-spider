@@ -29,6 +29,8 @@ import argparse
 from random import randrange
 from urlparse import urlparse, parse_qs, parse_qsl
 import socket
+import random
+import string
 #socket.setdefaulttimeout(30)
 
 
@@ -41,20 +43,32 @@ def parse_args():
 
 class XSS_tester():
 
+
     def __init__(self):
         #self.url = url
-        self.username = ''
-        self.password = ''
         # Unicode encoding
         # < = %uff1c, > = %uff1e, " = %u0022
-        self.payloads = ['"><SvG/oNlOaD=prompt(98)>', # Basic test within attribute like <meta value="INJECT">
-                         '/>SvG/OnLOAd=prompt(98)', # Basic test within html element like <title>INJECT</title>
-                         'jAvAscRiPt:prompt(98)',
-                         '\';prompt(98);//', # Test for XSS in embedded JS
-                         '%22%3E%3C%73%76%67%2F%6F%6E%6C%6F%61%64%3D%70%72%6F%6D%70%74%28%39%38%29%3E'] # Hex encoded ">svg/onload=prompt(98)>
-                         #'%u0022%uff1e%uff1csvg/onLoAd=prompt(98)%uff1e', # Unicode encoded no double quote, no < > '
-                         #'<object data=data:text/html;base64,Ij48c3ZnL29ubG9hZD1wcm9tcHQoNDMpPg==></object>'] # base64
-                         #'%2522%253E%253CsVg%252FonLoAd%253Dprompt(79)%253E', # double encoded  < " > =
+        self.username = ''
+        self.password = ''
+        self.xssDelim = self.generateDelimiter()
+        self.payloadTest = '"\'><()=;/:'
+        self.payloadTests = [self.xssDelim+'"\'><()=;/:'+self.xssDelim, # Normal check
+                             self.xssDelim+'%22%27%3E%3C%28%29%3D%3B%2F%3A'+self.xssDelim, # Hex encoded
+                             self.xssDelim+'&#34&#39&#62&#60&#40&#41&#61&#59&#47&#58'+self.xssDelim] # HTML encoded without semicolons
+
+        #self.payloads = ['"><SvG/oNlOaD=prompt(98)>', # Basic test within attribute like <meta value="INJECT">
+        #                 'jAvAscRiPt:prompt(98)',
+        #                 '\';prompt(98);//', # Test for XSS in embedded JS
+        #                 '<object data=data:text/html;base64,Ij48c3ZnL29ubG9hZD1wcm9tcHQoNDMpPg==></object>'] # base64
+
+
+    def generateDelimiter(self):
+        l1 = random.choice(string.ascii_lowercase)
+        l2 = random.choice(string.ascii_lowercase)
+        l3 = random.choice(string.ascii_lowercase)
+        l4 = random.choice(string.ascii_lowercase)
+        delim = '9'+l1+l2+l3+l4
+        return delim
 
     def getURLparams(self, url):
         ''' Parse out the URL parameters '''
@@ -78,7 +92,7 @@ class XSS_tester():
         # Create a list of lists, each list will be the URL we will test
         # This preserves the order of the URL parameters and will also
         # test each parameter individually instead of all at once
-        for payload in self.payloads:
+        for payload in self.payloadTests:
             allModdedParams[payload] = []
             for x in xrange(0, len(params)):
                 for p in params:
@@ -95,8 +109,6 @@ class XSS_tester():
                         moddedParams.append(p)
 
                 # Reset so we can step through again and change a diff param
-                #allModdedParams.append(moddedParams)
-                #allModdedParams[payload] = allModdedParams[payload]+moddedParams
                 allModdedParams[payload].append(moddedParams)
 
                 changedParam = False
@@ -113,15 +125,8 @@ class XSS_tester():
         params = self.getURLparams(url)
         moddedParams = self.change_params(params)
 
+#        print moddedParams
         return moddedParams
 
-        #print 'old url:', url
-        #for payload in moddedParams:
-        #    for params in moddedParams[payload]:
-        #        joinedParams = urllib.urlencode(params, doseq=1) # doseq maps the params back together
-        #        newUrl = urllib.unquote(self.protocol+self.hostname+self.path+'?'+joinedParams)
-        #        print 'new url:', newUrl
-        #        xssedLinks.append(newUrl)
-        #return xssedLinks
-
-X = XSS_tester().main(parse_args().url)
+X = XSS_tester()
+go = X.main(parse_args().url)
