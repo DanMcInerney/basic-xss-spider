@@ -1,8 +1,6 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-''' LEFT OFF: it will spider 1 depth level right now, no links are added to a global var '''
-
 import gevent.monkey
 gevent.monkey.patch_all()
 
@@ -43,9 +41,9 @@ class Spider:
 
         # Set up the logging
         self.logfile = open('vulnerable_URLs.txt', 'a')
-        logging.basicConfig(level=logging.DEBUG)
+        #logging.basicConfig(level=logging.DEBUG)
         #logging.basicConfig(level=logging.ERROR)
-        #logging.basicConfig(level=None)
+        logging.basicConfig(level=None)
         self.logger = logging.getLogger(__name__)
         self.handler = logging.FileHandler('crawler.log', 'a')
         self.handler.setLevel(logging.DEBUG)
@@ -187,7 +185,7 @@ class Spider:
                 if not linkSet.issubset(self.allLinks):
                     self.allLinks.add(link)
                     self.netQ.put((link, None))
-                    print 'Link found:', link ####################3
+                    print 'Link found:', link
                     # Add the XSS payloaded links to the queue if it has variables in it
                     self.checkForURLparams(link)
 
@@ -218,7 +216,7 @@ class Spider:
         if test in html:
             print '100% vulnerable:', url
             self.hit.append(url)
-            self.logfile.write(url+'\n')
+            self.logfile.write('VULNERABLE: '+url+'\n')
             return
 
         # Check which characters show up unescaped
@@ -237,12 +235,12 @@ class Spider:
                 if testList == chars:
                     print '100% vulnerable:', url
                     self.hit.append(url)
-                    self.logfile.write(url+'\n')
+                    self.logfile.write('VULNERABLE: '+url+'\n')
                     return
                 elif set(['"', '<', '>', '=', ')', '(']).issubset(set(chars)):
                     print 'Vulnerable! Try: "><svg onload=prompt(1) as the payload', url
                     self.hit.append(url)
-                    self.logfile.write(url)
+                    self.logfile.write('VULNERABLE: '+url+'\n')
                 #elif set([';', '(', ')']).issubset(set(chars)):
                 #    print 'If this parameter is reflected in javascript, try payload: javascript:alert(1)', url
                 #    self.hit.append(url)
