@@ -9,4 +9,4 @@ Spiders http://danmcinerney.org concurrently opening URLs found then checks thos
 If it finds all or some important characters in the response HTML it will add the URL to the vulnerable_URLs.txt logfile. Uses requests and gevent for async capabilities.
 
 
-Plans to rewrite this in Scrapy.
+Definitely not without bugs. Rewriting in Scrapy.
